@@ -19,179 +19,125 @@
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/kdtree/kdtree_flann.h>
+#include <boost/shared_ptr.hpp>
 
 const double PI = 3.1415926;
 const double rad2deg = 180 / PI;
 const double deg2rad = PI / 180;
 
-double initTime;
-double timeStart;
-double timeLasted;
+double time_first_scan;
+double dt_scan;
+double time_sweep_start;
 bool systemInited = false;
 
-double timeScanCur = 0;
-double timeScanLast = 0;
+double time_current_scan = 0;
+double time_last_scan = 0;
 
 int laserRotDir = 1;
-float laserAngleLast = 0;
-float laserAngleCur = 0;
+double laserAngleLast = 0;
+double laserAngleCur = 0;
 
-int skipFrameNum = 3;
+#define SKIP_FRAME_COUNT 3
 int skipFrameCount = 0;
 
-pcl::PointCloud<pcl::PointXYZHSV>::Ptr laserCloudExtreCur(new pcl::PointCloud<pcl::PointXYZHSV>());
+pcl::PointCloud<pcl::PointXYZHSV>::Ptr laserCloudFeaturesCurrent(new pcl::PointCloud<pcl::PointXYZHSV>());
 pcl::PointCloud<pcl::PointXYZHSV>::Ptr laserCloudLessExtreCur(new pcl::PointCloud<pcl::PointXYZHSV>());
 
 sensor_msgs::PointCloud2 laserCloudExtreCur2;
-sensor_msgs::PointCloud2 laserCloudLast2;
+sensor_msgs::PointCloud2 laserCloudLast;
 
-ros::Publisher* pubLaserCloudExtreCurPointer;
-ros::Publisher* pubLaserCloudLastPointer;
+boost::shared_ptr<ros::Publisher> pubLaserCloudExtreCurPointer;
+boost::shared_ptr<ros::Publisher> pubLaserCloudLastPointer;
 
 int cloudSortInd[800];
 int cloudNeighborPicked[800];
 
 int imuPointerFront = 0;
 int imuPointerLast = -1;
-const int imuQueLength = 400;
+const int IMU_BUFFER_SIZE = 400;
 bool imuInited = false;
 
-float imuRollStart, imuPitchStart, imuYawStart;
-float imuRollCur, imuPitchCur, imuYawCur;
+double roll_imu_start_sweep, pitch_imu_start_sweep, yaw_imu_start_sweep;
+double roll_imu_current, pitch_imu_current, yaw_imu_current;
 
-float imuVeloXStart, imuVeloYStart, imuVeloZStart;
-float imuShiftXStart, imuShiftYStart, imuShiftZStart;
-float imuVeloXCur, imuVeloYCur, imuVeloZCur;
-float imuShiftXCur, imuShiftYCur, imuShiftZCur;
+double vx_imu_start_sweep, vy_imu_start_sweep, vz_imu_start_sweep;
+double x_imu_start_sweep, y_imu_start_sweep, z_imu_start_sweep;
+double vx_imu_current, vy_imu_current, zx_imu_current;
+double x_imu_current, y_imu_current, z_imu_current;
 
-float imuShiftFromStartXCur, imuShiftFromStartYCur, imuShiftFromStartZCur;
-float imuVeloFromStartXCur, imuVeloFromStartYCur, imuVeloFromStartZCur;
+double imuShiftFromStartXCur, imuShiftFromStartYCur, imuShiftFromStartZCur;
+double imuVeloFromStartXCur, imuVeloFromStartYCur, imuVeloFromStartZCur;
 
-double imuTime[imuQueLength] = {0};
-float imuRoll[imuQueLength] = {0};
-float imuPitch[imuQueLength] = {0};
-float imuYaw[imuQueLength] = {0};
+double imuTime[IMU_BUFFER_SIZE] = {0};
+double imuRoll[IMU_BUFFER_SIZE] = {0};
+double imuPitch[IMU_BUFFER_SIZE] = {0};
+double imuYaw[IMU_BUFFER_SIZE] = {0};
 
-float imuAccX[imuQueLength] = {0};
-float imuAccY[imuQueLength] = {0};
-float imuAccZ[imuQueLength] = {0};
+double imuAccX[IMU_BUFFER_SIZE] = {0};
+double imuAccY[IMU_BUFFER_SIZE] = {0};
+double imuAccZ[IMU_BUFFER_SIZE] = {0};
 
-float imuVeloX[imuQueLength] = {0};
-float imuVeloY[imuQueLength] = {0};
-float imuVeloZ[imuQueLength] = {0};
+double vx_from_imu[IMU_BUFFER_SIZE] = {0};
+double vy_from_imu[IMU_BUFFER_SIZE] = {0};
+double vz_from_imu[IMU_BUFFER_SIZE] = {0};
 
-float imuShiftX[imuQueLength] = {0};
-float imuShiftY[imuQueLength] = {0};
-float imuShiftZ[imuQueLength] = {0};
-
-void ShiftToStartIMU()
-{
-  float x1 = cos(imuYawStart) * imuShiftFromStartXCur - sin(imuYawStart) * imuShiftFromStartZCur;
-  float y1 = imuShiftFromStartYCur;
-  float z1 = sin(imuYawStart) * imuShiftFromStartXCur + cos(imuYawStart) * imuShiftFromStartZCur;
-
-  float x2 = x1;
-  float y2 = cos(imuPitchStart) * y1 + sin(imuPitchStart) * z1;
-  float z2 = -sin(imuPitchStart) * y1 + cos(imuPitchStart) * z1;
-
-  imuShiftFromStartXCur = cos(imuRollStart) * x2 + sin(imuRollStart) * y2;
-  imuShiftFromStartYCur = -sin(imuRollStart) * x2 + cos(imuRollStart) * y2;
-  imuShiftFromStartZCur = z2;
-}
-
-void VeloToStartIMU()
-{
-  float x1 = cos(imuYawStart) * imuVeloFromStartXCur - sin(imuYawStart) * imuVeloFromStartZCur;
-  float y1 = imuVeloFromStartYCur;
-  float z1 = sin(imuYawStart) * imuVeloFromStartXCur + cos(imuYawStart) * imuVeloFromStartZCur;
-
-  float x2 = x1;
-  float y2 = cos(imuPitchStart) * y1 + sin(imuPitchStart) * z1;
-  float z2 = -sin(imuPitchStart) * y1 + cos(imuPitchStart) * z1;
-
-  imuVeloFromStartXCur = cos(imuRollStart) * x2 + sin(imuRollStart) * y2;
-  imuVeloFromStartYCur = -sin(imuRollStart) * x2 + cos(imuRollStart) * y2;
-  imuVeloFromStartZCur = z2;
-}
+double x_from_imu[IMU_BUFFER_SIZE] = {0};
+double y_from_imu[IMU_BUFFER_SIZE] = {0};
+double z_from_imu[IMU_BUFFER_SIZE] = {0};
 
 void TransformToStartIMU(pcl::PointXYZHSV *p)
 {
-  float x1 = cos(imuRollCur) * p->x - sin(imuRollCur) * p->y;
-  float y1 = sin(imuRollCur) * p->x + cos(imuRollCur) * p->y;
-  float z1 = p->z;
+  /**********************Transform it inertial frame********************************/
+  double x1 = cos(roll_imu_current) * p->x - sin(roll_imu_current) * p->y;
+  double y1 = sin(roll_imu_current) * p->x + cos(roll_imu_current) * p->y;
+  double z1 = p->z;
 
-  float x2 = x1;
-  float y2 = cos(imuPitchCur) * y1 - sin(imuPitchCur) * z1;
-  float z2 = sin(imuPitchCur) * y1 + cos(imuPitchCur) * z1;
+  double x2 = x1;
+  double y2 = cos(pitch_imu_current) * y1 - sin(pitch_imu_current) * z1;
+  double z2 = sin(pitch_imu_current) * y1 + cos(pitch_imu_current) * z1;
 
-  float x3 = cos(imuYawCur) * x2 + sin(imuYawCur) * z2;
-  float y3 = y2;
-  float z3 = -sin(imuYawCur) * x2 + cos(imuYawCur) * z2;
+  double x3 = cos(yaw_imu_current) * x2 + sin(yaw_imu_current) * z2;
+  double y3 = y2;
+  double z3 = -sin(yaw_imu_current) * x2 + cos(yaw_imu_current) * z2;
+  /*********************************************************************************/
+  /************Transform it to start sweep coordinate*******************************/
+  double x4 = cos(yaw_imu_start_sweep) * x3 - sin(yaw_imu_start_sweep) * z3;
+  double y4 = y3;
+  double z4 = sin(yaw_imu_start_sweep) * x3 + cos(yaw_imu_start_sweep) * z3;
 
-  float x4 = cos(imuYawStart) * x3 - sin(imuYawStart) * z3;
-  float y4 = y3;
-  float z4 = sin(imuYawStart) * x3 + cos(imuYawStart) * z3;
+  double x5 = x4;
+  double y5 = cos(pitch_imu_start_sweep) * y4 + sin(pitch_imu_start_sweep) * z4;
+  double z5 = -sin(pitch_imu_start_sweep) * y4 + cos(pitch_imu_start_sweep) * z4;
 
-  float x5 = x4;
-  float y5 = cos(imuPitchStart) * y4 + sin(imuPitchStart) * z4;
-  float z5 = -sin(imuPitchStart) * y4 + cos(imuPitchStart) * z4;
-
-  p->x = cos(imuRollStart) * x5 + sin(imuRollStart) * y5 + imuShiftFromStartXCur;
-  p->y = -sin(imuRollStart) * x5 + cos(imuRollStart) * y5 + imuShiftFromStartYCur;
+  p->x = cos(roll_imu_start_sweep) * x5 + sin(roll_imu_start_sweep) * y5 + imuShiftFromStartXCur;
+  p->y = -sin(roll_imu_start_sweep) * x5 + cos(roll_imu_start_sweep) * y5 + imuShiftFromStartYCur;
   p->z = z5 + imuShiftFromStartZCur;
+  /*********************************************************************************/
 }
 
-void AccumulateIMUShift()
+/*
+ *  publish feature point cloud(growing until sweep ends) with topic name of /laser_cloud_extre_cur
+ *  publish last point cloud(feature+non-feature, in camera coordinates(when last sweep start)) with topic name of /laser_cloud_last
+ *
+ *  with 13.36 Hz
+ */
+void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr&cloud_msg)
 {
-  float roll = imuRoll[imuPointerLast];
-  float pitch = imuPitch[imuPointerLast];
-  float yaw = imuYaw[imuPointerLast];
-  float accX = imuAccX[imuPointerLast];
-  float accY = imuAccY[imuPointerLast];
-  float accZ = imuAccZ[imuPointerLast];
-
-  float x1 = cos(roll) * accX - sin(roll) * accY;
-  float y1 = sin(roll) * accX + cos(roll) * accY;
-  float z1 = accZ;
-
-  float x2 = x1;
-  float y2 = cos(pitch) * y1 - sin(pitch) * z1;
-  float z2 = sin(pitch) * y1 + cos(pitch) * z1;
-
-  accX = cos(yaw) * x2 + sin(yaw) * z2;
-  accY = y2;
-  accZ = -sin(yaw) * x2 + cos(yaw) * z2;
-
-  int imuPointerBack = (imuPointerLast + imuQueLength - 1) % imuQueLength;
-  double timeDiff = imuTime[imuPointerLast] - imuTime[imuPointerBack];
-  if (timeDiff < 0.1) {
-
-    imuShiftX[imuPointerLast] = imuShiftX[imuPointerBack] + imuVeloX[imuPointerBack] * timeDiff 
-                              + accX * timeDiff * timeDiff / 2;
-    imuShiftY[imuPointerLast] = imuShiftY[imuPointerBack] + imuVeloY[imuPointerBack] * timeDiff 
-                              + accY * timeDiff * timeDiff / 2;
-    imuShiftZ[imuPointerLast] = imuShiftZ[imuPointerBack] + imuVeloZ[imuPointerBack] * timeDiff 
-                              + accZ * timeDiff * timeDiff / 2;
-
-    imuVeloX[imuPointerLast] = imuVeloX[imuPointerBack] + accX * timeDiff;
-    imuVeloY[imuPointerLast] = imuVeloY[imuPointerBack] + accY * timeDiff;
-    imuVeloZ[imuPointerLast] = imuVeloZ[imuPointerBack] + accZ * timeDiff;
-  }
-}
-
-void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
-{
+  /*
+   * cloud_msg is a point cloud already transformed into camera coordinates.
+   * (this laser scan implies encoder information)
+   */
   if (!systemInited) {
-    initTime = laserCloudIn2->header.stamp.toSec();
-    imuPointerFront = (imuPointerLast + 1) % imuQueLength;
+    time_first_scan = cloud_msg->header.stamp.toSec();
+    imuPointerFront = (imuPointerLast + 1) % IMU_BUFFER_SIZE;
     systemInited = true;
   }
 
-  timeScanLast = timeScanCur;
-  timeScanCur = laserCloudIn2->header.stamp.toSec();
-  timeLasted = timeScanCur - initTime;
+  time_last_scan = time_current_scan;
+  time_current_scan = cloud_msg->header.stamp.toSec();
+  dt_scan = time_current_scan - time_first_scan;
   pcl::PointCloud<pcl::PointXYZ>::Ptr laserCloudIn(new pcl::PointCloud<pcl::PointXYZ>());
-  pcl::fromROSMsg(*laserCloudIn2, *laserCloudIn);
+  pcl::fromROSMsg(*cloud_msg, *laserCloudIn);
   int cloudSize = laserCloudIn->points.size();
 
   pcl::PointCloud<pcl::PointXYZHSV>::Ptr laserCloud(new pcl::PointCloud<pcl::PointXYZHSV>(cloudSize, 1));
@@ -199,7 +145,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
     laserCloud->points[i].x = laserCloudIn->points[i].x;
     laserCloud->points[i].y = laserCloudIn->points[i].y;
     laserCloud->points[i].z = laserCloudIn->points[i].z;
-    laserCloud->points[i].h = timeLasted;
+    laserCloud->points[i].h = dt_scan;
     laserCloud->points[i].v = 0;
     cloudSortInd[i] = i;
     cloudNeighborPicked[i] = 0;
@@ -207,7 +153,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
 
   bool newSweep = false;
   laserAngleLast = laserAngleCur;
-  laserAngleCur = atan2(laserCloud->points[cloudSize - 1].y - laserCloud->points[0].y, 
+  laserAngleCur = atan2(laserCloud->points[cloudSize - 1].y - laserCloud->points[0].y,
                         laserCloud->points[cloudSize - 1].x - laserCloud->points[0].x);
 
   if (laserAngleLast > 0 && laserRotDir == 1 && laserAngleCur < laserAngleLast) {
@@ -218,173 +164,231 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
     newSweep = true;
   }
 
-  if (newSweep) {
-    timeStart = timeScanLast - initTime;
+  /********Hold accumulated point cloud(features + non-feature points) during last sweep in [laserCloudLast]******************************/
+  /*
+   * Last 4 points represent transformation between start and end of the sweep.
+   */
 
+  if (newSweep) {
+    time_sweep_start = time_last_scan - time_first_scan;
     pcl::PointCloud<pcl::PointXYZHSV>::Ptr imuTrans(new pcl::PointCloud<pcl::PointXYZHSV>(4, 1));
-    imuTrans->points[0].x = imuPitchStart;
-    imuTrans->points[0].y = imuYawStart;
-    imuTrans->points[0].z = imuRollStart;
+    imuTrans->points[0].x = pitch_imu_start_sweep;
+    imuTrans->points[0].y = yaw_imu_start_sweep;
+    imuTrans->points[0].z = roll_imu_start_sweep;
     imuTrans->points[0].v = 10;
 
-    imuTrans->points[1].x = imuPitchCur;
-    imuTrans->points[1].y = imuYawCur;
-    imuTrans->points[1].z = imuRollCur;
+    imuTrans->points[1].x = pitch_imu_current;
+    imuTrans->points[1].y = yaw_imu_current;
+    imuTrans->points[1].z = roll_imu_current;
     imuTrans->points[1].v = 11;
 
+    //imu relative position(wrt begin of sweep) at end of the sweep
     imuTrans->points[2].x = imuShiftFromStartXCur;
     imuTrans->points[2].y = imuShiftFromStartYCur;
     imuTrans->points[2].z = imuShiftFromStartZCur;
     imuTrans->points[2].v = 12;
 
+    //imu velocity at the end of the sweep
     imuTrans->points[3].x = imuVeloFromStartXCur;
     imuTrans->points[3].y = imuVeloFromStartYCur;
     imuTrans->points[3].z = imuVeloFromStartZCur;
     imuTrans->points[3].v = 13;
 
-    *laserCloudExtreCur += *laserCloudLessExtreCur;
-    pcl::toROSMsg(*laserCloudExtreCur + *imuTrans, laserCloudLast2);
-    laserCloudLast2.header.stamp = ros::Time().fromSec(timeScanLast);
-    laserCloudLast2.header.frame_id = "/camera";
-    laserCloudExtreCur->clear();
+    *laserCloudFeaturesCurrent += *laserCloudLessExtreCur;
+    pcl::toROSMsg(*laserCloudFeaturesCurrent + *imuTrans, laserCloudLast);
+    laserCloudLast.header.stamp = ros::Time().fromSec(time_last_scan);
+    laserCloudLast.header.frame_id = "/camera";
+    laserCloudFeaturesCurrent->clear();
     laserCloudLessExtreCur->clear();
-    imuTrans->clear();
 
-    imuRollStart = imuRollCur;
-    imuPitchStart = imuPitchCur;
-    imuYawStart = imuYawCur;
+    roll_imu_start_sweep = roll_imu_current;
+    pitch_imu_start_sweep = pitch_imu_current;
+    yaw_imu_start_sweep = yaw_imu_current;
 
-    imuVeloXStart = imuVeloXCur;
-    imuVeloYStart = imuVeloYCur;
-    imuVeloZStart = imuVeloZCur;
+    vx_imu_start_sweep = vx_imu_current;
+    vy_imu_start_sweep = vy_imu_current;
+    vz_imu_start_sweep = zx_imu_current;
 
-    imuShiftXStart = imuShiftXCur;
-    imuShiftYStart = imuShiftYCur;
-    imuShiftZStart = imuShiftZCur;
+    x_imu_start_sweep = x_imu_current;
+    y_imu_start_sweep = y_imu_current;
+    z_imu_start_sweep = z_imu_current;
   }
+  /*****************************************************************************************/
 
-  imuRollCur = 0; imuPitchCur = 0; imuYawCur = 0;
-  imuVeloXCur = 0; imuVeloYCur = 0; imuVeloZCur = 0;
-  imuShiftXCur = 0; imuShiftYCur = 0; imuShiftZCur = 0;
+  /*******************Has Effect only when imu is active**********************************/
+  //<editor-fold desc="It's running always, but without imu data it has no effect.">
+  /*
+   * Without imu updated, these 6 terms have no effect(remaining 0 always).
+   */
+  roll_imu_current = 0; pitch_imu_current = 0; yaw_imu_current = 0;
+  vx_imu_current = 0; vy_imu_current = 0; zx_imu_current = 0;
+  x_imu_current = 0; y_imu_current = 0; z_imu_current = 0;
+
   if (imuPointerLast >= 0) {
     while (imuPointerFront != imuPointerLast) {
-      if (timeScanCur < imuTime[imuPointerFront]) {
+      if (time_current_scan < imuTime[imuPointerFront]) {
         break;
       }
-      imuPointerFront = (imuPointerFront + 1) % imuQueLength;
+      imuPointerFront = (imuPointerFront + 1) % IMU_BUFFER_SIZE;
     }
 
-    if (timeScanCur > imuTime[imuPointerFront]) {
-      imuRollCur = imuRoll[imuPointerFront];
-      imuPitchCur = imuPitch[imuPointerFront];
-      imuYawCur = imuYaw[imuPointerFront];
+    if (time_current_scan > imuTime[imuPointerFront]) {
+      roll_imu_current = imuRoll[imuPointerFront];
+      pitch_imu_current = imuPitch[imuPointerFront];
+      yaw_imu_current = imuYaw[imuPointerFront];
 
-      imuVeloXCur = imuVeloX[imuPointerFront];
-      imuVeloYCur = imuVeloY[imuPointerFront];
-      imuVeloZCur = imuVeloZ[imuPointerFront];
+      vx_imu_current = vx_from_imu[imuPointerFront];
+      vy_imu_current = vy_from_imu[imuPointerFront];
+      zx_imu_current = vz_from_imu[imuPointerFront];
 
-      imuShiftXCur = imuShiftX[imuPointerFront];
-      imuShiftYCur = imuShiftY[imuPointerFront];
-      imuShiftZCur = imuShiftZ[imuPointerFront];
+      x_imu_current = x_from_imu[imuPointerFront];
+      y_imu_current = y_from_imu[imuPointerFront];
+      z_imu_current = z_from_imu[imuPointerFront];
     } else {
-      int imuPointerBack = (imuPointerFront + imuQueLength - 1) % imuQueLength;
-      float ratioFront = (timeScanCur - imuTime[imuPointerBack]) 
-                       / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
-      float ratioBack = (imuTime[imuPointerFront] - timeScanCur) 
-                      / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
+      int imuPointerBack = (imuPointerFront + IMU_BUFFER_SIZE - 1) % IMU_BUFFER_SIZE;
+      double ratioFront = (time_current_scan - imuTime[imuPointerBack])
+                         / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
+      double ratioBack = (imuTime[imuPointerFront] - time_current_scan)
+                        / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
 
-      imuRollCur = imuRoll[imuPointerFront] * ratioFront + imuRoll[imuPointerBack] * ratioBack;
-      imuPitchCur = imuPitch[imuPointerFront] * ratioFront + imuPitch[imuPointerBack] * ratioBack;
+      roll_imu_current = imuRoll[imuPointerFront] * ratioFront + imuRoll[imuPointerBack] * ratioBack;
+      pitch_imu_current = imuPitch[imuPointerFront] * ratioFront + imuPitch[imuPointerBack] * ratioBack;
       if (imuYaw[imuPointerFront] - imuYaw[imuPointerBack] > PI) {
-        imuYawCur = imuYaw[imuPointerFront] * ratioFront + (imuYaw[imuPointerBack] + 2 * PI) * ratioBack;
+        yaw_imu_current = imuYaw[imuPointerFront] * ratioFront + (imuYaw[imuPointerBack] + 2 * PI) * ratioBack;
       } else if (imuYaw[imuPointerFront] - imuYaw[imuPointerBack] < -PI) {
-        imuYawCur = imuYaw[imuPointerFront] * ratioFront + (imuYaw[imuPointerBack] - 2 * PI) * ratioBack;
+        yaw_imu_current = imuYaw[imuPointerFront] * ratioFront + (imuYaw[imuPointerBack] - 2 * PI) * ratioBack;
       } else {
-        imuYawCur = imuYaw[imuPointerFront] * ratioFront + imuYaw[imuPointerBack] * ratioBack;
+        yaw_imu_current = imuYaw[imuPointerFront] * ratioFront + imuYaw[imuPointerBack] * ratioBack;
       }
 
-      imuVeloXCur = imuVeloX[imuPointerFront] * ratioFront + imuVeloX[imuPointerBack] * ratioBack;
-      imuVeloYCur = imuVeloY[imuPointerFront] * ratioFront + imuVeloY[imuPointerBack] * ratioBack;
-      imuVeloZCur = imuVeloZ[imuPointerFront] * ratioFront + imuVeloZ[imuPointerBack] * ratioBack;
+      vx_imu_current = vx_from_imu[imuPointerFront] * ratioFront + vx_from_imu[imuPointerBack] * ratioBack;
+      vy_imu_current = vy_from_imu[imuPointerFront] * ratioFront + vy_from_imu[imuPointerBack] * ratioBack;
+      zx_imu_current = vz_from_imu[imuPointerFront] * ratioFront + vz_from_imu[imuPointerBack] * ratioBack;
 
-      imuShiftXCur = imuShiftX[imuPointerFront] * ratioFront + imuShiftX[imuPointerBack] * ratioBack;
-      imuShiftYCur = imuShiftY[imuPointerFront] * ratioFront + imuShiftY[imuPointerBack] * ratioBack;
-      imuShiftZCur = imuShiftZ[imuPointerFront] * ratioFront + imuShiftZ[imuPointerBack] * ratioBack;
+      x_imu_current = x_from_imu[imuPointerFront] * ratioFront + x_from_imu[imuPointerBack] * ratioBack;
+      y_imu_current = y_from_imu[imuPointerFront] * ratioFront + y_from_imu[imuPointerBack] * ratioBack;
+      z_imu_current = z_from_imu[imuPointerFront] * ratioFront + z_from_imu[imuPointerBack] * ratioBack;
     }
+
+    if (!imuInited) {
+      roll_imu_start_sweep = roll_imu_current;
+      pitch_imu_start_sweep = pitch_imu_current;
+      yaw_imu_start_sweep = yaw_imu_current;
+
+      vx_imu_start_sweep = vx_imu_current;
+      vy_imu_start_sweep = vy_imu_current;
+      vz_imu_start_sweep = zx_imu_current;
+
+      x_imu_start_sweep = x_imu_current;
+      y_imu_start_sweep = y_imu_current;
+      z_imu_start_sweep = z_imu_current;
+
+      imuInited = true;
+    }
+
   }
 
-  if (!imuInited) {
-    imuRollStart = imuRollCur;
-    imuPitchStart = imuPitchCur;
-    imuYawStart = imuYawCur;
 
-    imuVeloXStart = imuVeloXCur;
-    imuVeloYStart = imuVeloYCur;
-    imuVeloZStart = imuVeloZCur;
+  /*************************************/
+  double x1,y1,z1,x2,y2,z2;
+  //translational shift of imu from begin of sweep.
+  //TODO : what is '- vx_imu_start_sweep * (dt_scan - time_sweep_start)' term?
+  imuShiftFromStartXCur = x_imu_current - x_imu_start_sweep - vx_imu_start_sweep * (dt_scan - time_sweep_start);
+  imuShiftFromStartYCur = y_imu_current - y_imu_start_sweep - vy_imu_start_sweep * (dt_scan - time_sweep_start);
+  imuShiftFromStartZCur = z_imu_current - z_imu_start_sweep - vz_imu_start_sweep * (dt_scan - time_sweep_start);
+  x1 = cos(yaw_imu_start_sweep) * imuShiftFromStartXCur - sin(yaw_imu_start_sweep) * imuShiftFromStartZCur;
+  y1 = imuShiftFromStartYCur;
+  z1 = sin(yaw_imu_start_sweep) * imuShiftFromStartXCur + cos(yaw_imu_start_sweep) * imuShiftFromStartZCur;
 
-    imuShiftXStart = imuShiftXCur;
-    imuShiftYStart = imuShiftYCur;
-    imuShiftZStart = imuShiftZCur;
+  x2 = x1;
+  y2 = cos(pitch_imu_start_sweep) * y1 + sin(pitch_imu_start_sweep) * z1;
+  z2 = -sin(pitch_imu_start_sweep) * y1 + cos(pitch_imu_start_sweep) * z1;
 
-    imuInited = true;
-  }
+  imuShiftFromStartXCur = cos(roll_imu_start_sweep) * x2 + sin(roll_imu_start_sweep) * y2;
+  imuShiftFromStartYCur = -sin(roll_imu_start_sweep) * x2 + cos(roll_imu_start_sweep) * y2;
+  imuShiftFromStartZCur = z2;
+  /*************************************/
 
-  imuShiftFromStartXCur = imuShiftXCur - imuShiftXStart - imuVeloXStart * (timeLasted - timeStart);
-  imuShiftFromStartYCur = imuShiftYCur - imuShiftYStart - imuVeloYStart * (timeLasted - timeStart);
-  imuShiftFromStartZCur = imuShiftZCur - imuShiftZStart - imuVeloZStart * (timeLasted - timeStart);
+  /*************************************/
+  imuVeloFromStartXCur = vx_imu_current - vx_imu_start_sweep;
+  imuVeloFromStartYCur = vy_imu_current - vy_imu_start_sweep;
+  imuVeloFromStartZCur = zx_imu_current - vz_imu_start_sweep;
 
-  ShiftToStartIMU();
+  x1 = cos(yaw_imu_start_sweep) * imuVeloFromStartXCur - sin(yaw_imu_start_sweep) * imuVeloFromStartZCur;
+  y1 = imuVeloFromStartYCur;
+  z1 = sin(yaw_imu_start_sweep) * imuVeloFromStartXCur + cos(yaw_imu_start_sweep) * imuVeloFromStartZCur;
 
-  imuVeloFromStartXCur = imuVeloXCur - imuVeloXStart;
-  imuVeloFromStartYCur = imuVeloYCur - imuVeloYStart;
-  imuVeloFromStartZCur = imuVeloZCur - imuVeloZStart;
+  x2 = x1;
+  y2 = cos(pitch_imu_start_sweep) * y1 + sin(pitch_imu_start_sweep) * z1;
+  z2 = -sin(pitch_imu_start_sweep) * y1 + cos(pitch_imu_start_sweep) * z1;
 
-  VeloToStartIMU();
+  imuVeloFromStartXCur = cos(roll_imu_start_sweep) * x2 + sin(roll_imu_start_sweep) * y2;
+  imuVeloFromStartYCur = -sin(roll_imu_start_sweep) * x2 + cos(roll_imu_start_sweep) * y2;
+  imuVeloFromStartZCur = z2;
+  /*************************************/
 
   for (int i = 0; i < cloudSize; i++) {
     TransformToStartIMU(&laserCloud->points[i]);
   }
+  //</editor-fold>
+  /**************************************************************************************/
 
+  //Compute 's' (in paper called 'c' value)
   for (int i = 5; i < cloudSize - 5; i++) {
-    float diffX = laserCloud->points[i - 5].x + laserCloud->points[i - 4].x 
-                + laserCloud->points[i - 3].x + laserCloud->points[i - 2].x 
-                + laserCloud->points[i - 1].x - 10 * laserCloud->points[i].x 
-                + laserCloud->points[i + 1].x + laserCloud->points[i + 2].x
-                + laserCloud->points[i + 3].x + laserCloud->points[i + 4].x
-                + laserCloud->points[i + 5].x;
-    float diffY = laserCloud->points[i - 5].y + laserCloud->points[i - 4].y 
-                + laserCloud->points[i - 3].y + laserCloud->points[i - 2].y 
-                + laserCloud->points[i - 1].y - 10 * laserCloud->points[i].y 
-                + laserCloud->points[i + 1].y + laserCloud->points[i + 2].y
-                + laserCloud->points[i + 3].y + laserCloud->points[i + 4].y
-                + laserCloud->points[i + 5].y;
-    float diffZ = laserCloud->points[i - 5].z + laserCloud->points[i - 4].z 
-                + laserCloud->points[i - 3].z + laserCloud->points[i - 2].z 
-                + laserCloud->points[i - 1].z - 10 * laserCloud->points[i].z 
-                + laserCloud->points[i + 1].z + laserCloud->points[i + 2].z
-                + laserCloud->points[i + 3].z + laserCloud->points[i + 4].z
-                + laserCloud->points[i + 5].z;
-    
+   /*
+     Point p = zero;
+     for(int k=i-5; k<i+5;k++)
+     {
+       p = p + (laserCloud->points[k] - laserCloud->points[i]);
+     }
+     laserCloud->points[i].s = norm(p);
+   */
+    double diffX = laserCloud->points[i - 5].x + laserCloud->points[i - 4].x
+                  + laserCloud->points[i - 3].x + laserCloud->points[i - 2].x
+                  + laserCloud->points[i - 1].x - 10 * laserCloud->points[i].x
+                  + laserCloud->points[i + 1].x + laserCloud->points[i + 2].x
+                  + laserCloud->points[i + 3].x + laserCloud->points[i + 4].x
+                  + laserCloud->points[i + 5].x;
+    double diffY = laserCloud->points[i - 5].y + laserCloud->points[i - 4].y
+                  + laserCloud->points[i - 3].y + laserCloud->points[i - 2].y
+                  + laserCloud->points[i - 1].y - 10 * laserCloud->points[i].y
+                  + laserCloud->points[i + 1].y + laserCloud->points[i + 2].y
+                  + laserCloud->points[i + 3].y + laserCloud->points[i + 4].y
+                  + laserCloud->points[i + 5].y;
+    double diffZ = laserCloud->points[i - 5].z + laserCloud->points[i - 4].z
+                  + laserCloud->points[i - 3].z + laserCloud->points[i - 2].z
+                  + laserCloud->points[i - 1].z - 10 * laserCloud->points[i].z
+                  + laserCloud->points[i + 1].z + laserCloud->points[i + 2].z
+                  + laserCloud->points[i + 3].z + laserCloud->points[i + 4].z
+                  + laserCloud->points[i + 5].z;
+
     laserCloud->points[i].s = diffX * diffX + diffY * diffY + diffZ * diffZ;
   }
-  
-  for (int i = 5; i < cloudSize - 6; i++) {
-    float diffX = laserCloud->points[i + 1].x - laserCloud->points[i].x;
-    float diffY = laserCloud->points[i + 1].y - laserCloud->points[i].y;
-    float diffZ = laserCloud->points[i + 1].z - laserCloud->points[i].z;
-    float diff = diffX * diffX + diffY * diffY + diffZ * diffZ;
 
+  for (int i = 5; i < cloudSize - 6; i++) {
+    double diffX = laserCloud->points[i + 1].x - laserCloud->points[i].x;
+    double diffY = laserCloud->points[i + 1].y - laserCloud->points[i].y;
+    double diffZ = laserCloud->points[i + 1].z - laserCloud->points[i].z;
+    double diff = diffX * diffX + diffY * diffY + diffZ * diffZ;
+
+    //point_(i+1) is disconnected from point_i
     if (diff > 0.05) {
 
-      float depth1 = sqrt(laserCloud->points[i].x * laserCloud->points[i].x + 
-                     laserCloud->points[i].y * laserCloud->points[i].y +
-                     laserCloud->points[i].z * laserCloud->points[i].z);
+      double depth1 = sqrt(laserCloud->points[i].x * laserCloud->points[i].x +
+                          laserCloud->points[i].y * laserCloud->points[i].y +
+                          laserCloud->points[i].z * laserCloud->points[i].z);
 
-      float depth2 = sqrt(laserCloud->points[i + 1].x * laserCloud->points[i + 1].x + 
-                     laserCloud->points[i + 1].y * laserCloud->points[i + 1].y +
-                     laserCloud->points[i + 1].z * laserCloud->points[i + 1].z);
+      double depth2 = sqrt(laserCloud->points[i + 1].x * laserCloud->points[i + 1].x +
+                          laserCloud->points[i + 1].y * laserCloud->points[i + 1].y +
+                          laserCloud->points[i + 1].z * laserCloud->points[i + 1].z);
 
       if (depth1 > depth2) {
+        /*
+        point_i is behind of point_(i+1)
+        point_i might be the boundary of occluded segment.
+        */
+
+        //normalize point_i such that it's length become depth2
         diffX = laserCloud->points[i + 1].x - laserCloud->points[i].x * depth2 / depth1;
         diffY = laserCloud->points[i + 1].y - laserCloud->points[i].y * depth2 / depth1;
         diffZ = laserCloud->points[i + 1].z - laserCloud->points[i].z * depth2 / depth1;
@@ -397,12 +401,21 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
           cloudNeighborPicked[i - 1] = 1;
           cloudNeighborPicked[i] = 1;
         }
-      } else {
+      }
+      else
+      {
+        /*
+          point_(i+1) is behind of point_i
+          point_(i+1) might be the boundary of occluded segment
+        */
+        //normalize point_(i+1) such that it's length become depth1
         diffX = laserCloud->points[i + 1].x * depth1 / depth2 - laserCloud->points[i].x;
         diffY = laserCloud->points[i + 1].y * depth1 / depth2 - laserCloud->points[i].y;
         diffZ = laserCloud->points[i + 1].z * depth1 / depth2 - laserCloud->points[i].z;
 
         if (sqrt(diffX * diffX + diffY * diffY + diffZ * diffZ) / depth1 < 0.1) {
+          //if lateral distance of two points is close enough.
+          //it is considered point_i is occluded point
           cloudNeighborPicked[i + 1] = 1;
           cloudNeighborPicked[i + 2] = 1;
           cloudNeighborPicked[i + 3] = 1;
@@ -413,15 +426,16 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
       }
     }
 
-    float diffX2 = laserCloud->points[i].x - laserCloud->points[i - 1].x;
-    float diffY2 = laserCloud->points[i].y - laserCloud->points[i - 1].y;
-    float diffZ2 = laserCloud->points[i].z - laserCloud->points[i - 1].z;
-    float diff2 = diffX2 * diffX2 + diffY2 * diffY2 + diffZ2 * diffZ2;
+    double diffX2 = laserCloud->points[i].x - laserCloud->points[i - 1].x;
+    double diffY2 = laserCloud->points[i].y - laserCloud->points[i - 1].y;
+    double diffZ2 = laserCloud->points[i].z - laserCloud->points[i - 1].z;
+    double diff2 = diffX2 * diffX2 + diffY2 * diffY2 + diffZ2 * diffZ2;
 
-    float dis = laserCloud->points[i].x * laserCloud->points[i].x
-              + laserCloud->points[i].y * laserCloud->points[i].y
-              + laserCloud->points[i].z * laserCloud->points[i].z;
+    double dis = laserCloud->points[i].x * laserCloud->points[i].x
+                + laserCloud->points[i].y * laserCloud->points[i].y
+                + laserCloud->points[i].z * laserCloud->points[i].z;
 
+    //What the hell is this?
     if (diff > (0.25 * 0.25) / (20 * 20) * dis && diff2 > (0.25 * 0.25) / (20 * 20) * dis) {
       cloudNeighborPicked[i] = 1;
     }
@@ -432,11 +446,13 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
   pcl::PointCloud<pcl::PointXYZHSV>::Ptr surfPointsFlat(new pcl::PointCloud<pcl::PointXYZHSV>());
   pcl::PointCloud<pcl::PointXYZHSV>::Ptr surfPointsLessFlat(new pcl::PointCloud<pcl::PointXYZHSV>());
 
-  int startPoints[4] = {5, 6 + int((cloudSize - 10) / 4.0), 
+  //Divide single scan into 4 separated subregions(ignoring first and last 5 data points)
+  int startPoints[4] = {5, 6 + int((cloudSize - 10) / 4.0),
                         6 + int((cloudSize - 10) / 2.0), 6 + int(3 * (cloudSize - 10) / 4.0)};
-  int endPoints[4] = {5 + int((cloudSize - 10) / 4.0), 5 + int((cloudSize - 10) / 2.0), 
+  int endPoints[4] = {5 + int((cloudSize - 10) / 4.0), 5 + int((cloudSize - 10) / 2.0),
                       5 + int(3 * (cloudSize - 10) / 4.0), cloudSize - 6};
 
+  //Sort computed value('s' , in paper called 'c') in ascending order
   for (int i = 0; i < 4; i++) {
     int sp = startPoints[i];
     int ep = endPoints[i];
@@ -451,49 +467,57 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
       }
     }
 
+    //Select features for edge
     int largestPickedNum = 0;
     for (int j = ep; j >= sp; j--) {
       if (cloudNeighborPicked[cloudSortInd[j]] == 0 &&
           laserCloud->points[cloudSortInd[j]].s > 0.1 &&
-          (fabs(laserCloud->points[cloudSortInd[j]].x) > 0.3 || 
-          fabs(laserCloud->points[cloudSortInd[j]].y) > 0.3 || 
-          fabs(laserCloud->points[cloudSortInd[j]].z) > 0.3) && 
-          fabs(laserCloud->points[cloudSortInd[j]].x) < 30 && 
-          fabs(laserCloud->points[cloudSortInd[j]].y) < 30 && 
+          (fabs(laserCloud->points[cloudSortInd[j]].x) > 0.3 ||
+           fabs(laserCloud->points[cloudSortInd[j]].y) > 0.3 ||
+           fabs(laserCloud->points[cloudSortInd[j]].z) > 0.3) &&
+          fabs(laserCloud->points[cloudSortInd[j]].x) < 30 &&
+          fabs(laserCloud->points[cloudSortInd[j]].y) < 30 &&
           fabs(laserCloud->points[cloudSortInd[j]].z) < 30) {
-        
+
         largestPickedNum++;
         if (largestPickedNum <= 2) {
+          //Maybe this is dominant feature(edge)?
           laserCloud->points[cloudSortInd[j]].v = 2;
           cornerPointsSharp->push_back(laserCloud->points[cloudSortInd[j]]);
         } else if (largestPickedNum <= 20) {
+          //This is less dominant features(edge)?
           laserCloud->points[cloudSortInd[j]].v = 1;
           cornerPointsLessSharp->push_back(laserCloud->points[cloudSortInd[j]]);
         } else {
+          //Stop.
           break;
         }
 
+        //Mark point_i as selected
         cloudNeighborPicked[cloudSortInd[j]] = 1;
+
+        //mark points which follow point_i selected.
         for (int k = 1; k <= 5; k++) {
-          float diffX = laserCloud->points[cloudSortInd[j] + k].x 
-                      - laserCloud->points[cloudSortInd[j] + k - 1].x;
-          float diffY = laserCloud->points[cloudSortInd[j] + k].y 
-                      - laserCloud->points[cloudSortInd[j] + k - 1].y;
-          float diffZ = laserCloud->points[cloudSortInd[j] + k].z 
-                      - laserCloud->points[cloudSortInd[j] + k - 1].z;
+          double diffX = laserCloud->points[cloudSortInd[j] + k].x
+                        - laserCloud->points[cloudSortInd[j] + k - 1].x;
+          double diffY = laserCloud->points[cloudSortInd[j] + k].y
+                        - laserCloud->points[cloudSortInd[j] + k - 1].y;
+          double diffZ = laserCloud->points[cloudSortInd[j] + k].z
+                        - laserCloud->points[cloudSortInd[j] + k - 1].z;
           if (diffX * diffX + diffY * diffY + diffZ * diffZ > 0.05) {
             break;
           }
 
           cloudNeighborPicked[cloudSortInd[j] + k] = 1;
         }
+        //mark points which preceding point_i selected.
         for (int k = -1; k >= -5; k--) {
-          float diffX = laserCloud->points[cloudSortInd[j] + k].x 
-                      - laserCloud->points[cloudSortInd[j] + k + 1].x;
-          float diffY = laserCloud->points[cloudSortInd[j] + k].y 
-                      - laserCloud->points[cloudSortInd[j] + k + 1].y;
-          float diffZ = laserCloud->points[cloudSortInd[j] + k].z 
-                      - laserCloud->points[cloudSortInd[j] + k + 1].z;
+          double diffX = laserCloud->points[cloudSortInd[j] + k].x
+                        - laserCloud->points[cloudSortInd[j] + k + 1].x;
+          double diffY = laserCloud->points[cloudSortInd[j] + k].y
+                        - laserCloud->points[cloudSortInd[j] + k + 1].y;
+          double diffZ = laserCloud->points[cloudSortInd[j] + k].z
+                        - laserCloud->points[cloudSortInd[j] + k + 1].z;
           if (diffX * diffX + diffY * diffY + diffZ * diffZ > 0.05) {
             break;
           }
@@ -502,16 +526,16 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
         }
       }
     }
-
+    //Select features for surface
     int smallestPickedNum = 0;
     for (int j = sp; j <= ep; j++) {
       if (cloudNeighborPicked[cloudSortInd[j]] == 0 &&
           laserCloud->points[cloudSortInd[j]].s < 0.1 &&
-          (fabs(laserCloud->points[cloudSortInd[j]].x) > 0.3 || 
-          fabs(laserCloud->points[cloudSortInd[j]].y) > 0.3 || 
-          fabs(laserCloud->points[cloudSortInd[j]].z) > 0.3) && 
-          fabs(laserCloud->points[cloudSortInd[j]].x) < 30 && 
-          fabs(laserCloud->points[cloudSortInd[j]].y) < 30 && 
+          (fabs(laserCloud->points[cloudSortInd[j]].x) > 0.3 ||
+           fabs(laserCloud->points[cloudSortInd[j]].y) > 0.3 ||
+           fabs(laserCloud->points[cloudSortInd[j]].z) > 0.3) &&
+          fabs(laserCloud->points[cloudSortInd[j]].x) < 30 &&
+          fabs(laserCloud->points[cloudSortInd[j]].y) < 30 &&
           fabs(laserCloud->points[cloudSortInd[j]].z) < 30) {
 
         laserCloud->points[cloudSortInd[j]].v = -1;
@@ -524,12 +548,12 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
 
         cloudNeighborPicked[cloudSortInd[j]] = 1;
         for (int k = 1; k <= 5; k++) {
-          float diffX = laserCloud->points[cloudSortInd[j] + k].x 
-                      - laserCloud->points[cloudSortInd[j] + k - 1].x;
-          float diffY = laserCloud->points[cloudSortInd[j] + k].y 
-                      - laserCloud->points[cloudSortInd[j] + k - 1].y;
-          float diffZ = laserCloud->points[cloudSortInd[j] + k].z 
-                      - laserCloud->points[cloudSortInd[j] + k - 1].z;
+          double diffX = laserCloud->points[cloudSortInd[j] + k].x
+                        - laserCloud->points[cloudSortInd[j] + k - 1].x;
+          double diffY = laserCloud->points[cloudSortInd[j] + k].y
+                        - laserCloud->points[cloudSortInd[j] + k - 1].y;
+          double diffZ = laserCloud->points[cloudSortInd[j] + k].z
+                        - laserCloud->points[cloudSortInd[j] + k - 1].z;
           if (diffX * diffX + diffY * diffY + diffZ * diffZ > 0.05) {
             break;
           }
@@ -537,12 +561,12 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
           cloudNeighborPicked[cloudSortInd[j] + k] = 1;
         }
         for (int k = -1; k >= -5; k--) {
-          float diffX = laserCloud->points[cloudSortInd[j] + k].x 
-                      - laserCloud->points[cloudSortInd[j] + k + 1].x;
-          float diffY = laserCloud->points[cloudSortInd[j] + k].y 
-                      - laserCloud->points[cloudSortInd[j] + k + 1].y;
-          float diffZ = laserCloud->points[cloudSortInd[j] + k].z 
-                      - laserCloud->points[cloudSortInd[j] + k + 1].z;
+          double diffX = laserCloud->points[cloudSortInd[j] + k].x
+                        - laserCloud->points[cloudSortInd[j] + k + 1].x;
+          double diffY = laserCloud->points[cloudSortInd[j] + k].y
+                        - laserCloud->points[cloudSortInd[j] + k + 1].y;
+          double diffZ = laserCloud->points[cloudSortInd[j] + k].z
+                        - laserCloud->points[cloudSortInd[j] + k + 1].z;
           if (diffX * diffX + diffY * diffY + diffZ * diffZ > 0.05) {
             break;
           }
@@ -553,43 +577,39 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
     }
   }
 
+  //Normal points
   for (int i = 0; i < cloudSize; i++) {
     if (laserCloud->points[i].v == 0) {
       surfPointsLessFlat->push_back(laserCloud->points[i]);
     }
   }
 
+  //Downsampling
   pcl::PointCloud<pcl::PointXYZHSV>::Ptr surfPointsLessFlatDS(new pcl::PointCloud<pcl::PointXYZHSV>());
   pcl::VoxelGrid<pcl::PointXYZHSV> downSizeFilter;
   downSizeFilter.setInputCloud(surfPointsLessFlat);
   downSizeFilter.setLeafSize(0.1, 0.1, 0.1);
   downSizeFilter.filter(*surfPointsLessFlatDS);
 
-  *laserCloudExtreCur += *cornerPointsSharp;
-  *laserCloudExtreCur += *surfPointsFlat;
+  //Accumulate feature points and normal points for single scan
+  *laserCloudFeaturesCurrent += *cornerPointsSharp;
+  *laserCloudFeaturesCurrent += *surfPointsFlat;
   *laserCloudLessExtreCur += *cornerPointsLessSharp;
   *laserCloudLessExtreCur += *surfPointsLessFlatDS;
 
-  laserCloudIn->clear();
-  laserCloud->clear();
-  cornerPointsSharp->clear();
-  cornerPointsLessSharp->clear();
-  surfPointsFlat->clear();
-  surfPointsLessFlat->clear();
-  surfPointsLessFlatDS->clear();
-
-  if (skipFrameCount >= skipFrameNum) {
+  if (skipFrameCount >= SKIP_FRAME_COUNT) {
+    //publish feature points(growing) and last point cloud(feature+non-feature, local) with 13.36 Hz
     skipFrameCount = 0;
 
     pcl::PointCloud<pcl::PointXYZHSV>::Ptr imuTrans(new pcl::PointCloud<pcl::PointXYZHSV>(4, 1));
-    imuTrans->points[0].x = imuPitchStart;
-    imuTrans->points[0].y = imuYawStart;
-    imuTrans->points[0].z = imuRollStart;
+    imuTrans->points[0].x = pitch_imu_start_sweep;
+    imuTrans->points[0].y = yaw_imu_start_sweep;
+    imuTrans->points[0].z = roll_imu_start_sweep;
     imuTrans->points[0].v = 10;
 
-    imuTrans->points[1].x = imuPitchCur;
-    imuTrans->points[1].y = imuYawCur;
-    imuTrans->points[1].z = imuRollCur;
+    imuTrans->points[1].x = pitch_imu_current;
+    imuTrans->points[1].y = yaw_imu_current;
+    imuTrans->points[1].z = roll_imu_current;
     imuTrans->points[1].v = 11;
 
     imuTrans->points[2].x = imuShiftFromStartXCur;
@@ -602,20 +622,74 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudIn2)
     imuTrans->points[3].z = imuVeloFromStartZCur;
     imuTrans->points[3].v = 13;
 
-    sensor_msgs::PointCloud2 laserCloudExtreCur2;
-    pcl::toROSMsg(*laserCloudExtreCur + *imuTrans, laserCloudExtreCur2);
-    laserCloudExtreCur2.header.stamp = ros::Time().fromSec(timeScanCur);
-    laserCloudExtreCur2.header.frame_id = "/camera";
-    pubLaserCloudExtreCurPointer->publish(laserCloudExtreCur2);
-    imuTrans->clear();
+    sensor_msgs::PointCloud2 features_out_msg;
+    pcl::toROSMsg(*laserCloudFeaturesCurrent + *imuTrans, features_out_msg);
+    features_out_msg.header.stamp = ros::Time().fromSec(time_current_scan);
+    features_out_msg.header.frame_id = "/camera";
 
-    pubLaserCloudLastPointer->publish(laserCloudLast2);
+    pubLaserCloudExtreCurPointer->publish(features_out_msg);
+    pubLaserCloudLastPointer->publish(laserCloudLast);
 
-    //ROS_INFO ("%d %d", laserCloudLast2.width, laserCloudExtreCur2.width);
+    //ROS_INFO ("%d %d", laserCloudLast.width, features_out_msg.width);
   }
   skipFrameCount++;
+
+//  printf("%+6.3lf %+6.3lf %+6.3lf %+6.3lf %+6.3lf %+6.3lf %+6.3lf %+6.3lf %+6.3lf\n",
+//         vx_imu_current, vy_imu_current, zx_imu_current,
+//         x_imu_current, y_imu_current, z_imu_current,
+//  roll_imu_current, pitch_imu_current, yaw_imu_current);
+//  fflush(stdout);
 }
 
+/*
+ * Dead reckoning from raw accerlomter.
+ */
+void AccumulateIMUShift()
+{
+  double roll = imuRoll[imuPointerLast];
+  double pitch = imuPitch[imuPointerLast];
+  double yaw = imuYaw[imuPointerLast];
+  double accX = imuAccX[imuPointerLast];
+  double accY = imuAccY[imuPointerLast];
+  double accZ = imuAccZ[imuPointerLast];
+
+  /**********************Transform acceleration from local to reference frame****************************/
+  double x1 = cos(roll) * accX - sin(roll) * accY;
+  double y1 = sin(roll) * accX + cos(roll) * accY;
+  double z1 = accZ;
+
+  double x2 = x1;
+  double y2 = cos(pitch) * y1 - sin(pitch) * z1;
+  double z2 = sin(pitch) * y1 + cos(pitch) * z1;
+
+  accX = cos(yaw) * x2 + sin(yaw) * z2;
+  accY = y2;
+  accZ = -sin(yaw) * x2 + cos(yaw) * z2;
+  /*****************************************************************************************************/
+
+  /********************Dead Reckoning.....**************************************************************/
+  int imuPointerBack = (imuPointerLast -1 + IMU_BUFFER_SIZE) % IMU_BUFFER_SIZE;
+  double dt = imuTime[imuPointerLast] - imuTime[imuPointerBack];
+  if (dt < 0.1) //This if statement is meaningless.(imu is published with 400 hz)
+  {
+    x_from_imu[imuPointerLast] = x_from_imu[imuPointerBack] + vx_from_imu[imuPointerBack] * dt
+                                + accX * dt * dt / 2;
+    y_from_imu[imuPointerLast] = y_from_imu[imuPointerBack] + vy_from_imu[imuPointerBack] * dt
+                                + accY * dt * dt / 2;
+    z_from_imu[imuPointerLast] = z_from_imu[imuPointerBack] + vz_from_imu[imuPointerBack] * dt
+                                + accZ * dt * dt / 2;
+
+    vx_from_imu[imuPointerLast] = vx_from_imu[imuPointerBack] + accX * dt;
+    vy_from_imu[imuPointerLast] = vy_from_imu[imuPointerBack] + accY * dt;
+    vz_from_imu[imuPointerLast] = vz_from_imu[imuPointerBack] + accZ * dt;
+  }
+  /*****************************************************************************************************/
+}
+
+/*
+ * Set current orientation(Roll,Pitch,Yaw) from imu data.
+ * Set linear acceleration(gravity compensated) from raw imu data.
+ */
 void imuHandler(const sensor_msgs::Imu::ConstPtr& imuIn)
 {
   double roll, pitch, yaw;
@@ -623,13 +697,14 @@ void imuHandler(const sensor_msgs::Imu::ConstPtr& imuIn)
   tf::quaternionMsgToTF(imuIn->orientation, orientation);
   tf::Matrix3x3(orientation).getRPY(roll, pitch, yaw);
 
-  float accX = imuIn->linear_acceleration.y - sin(roll) * cos(pitch) * 9.81;
-  float accY = imuIn->linear_acceleration.z - cos(roll) * cos(pitch) * 9.81;
-  float accZ = imuIn->linear_acceleration.x + sin(pitch) * 9.81;
+  //remove gravity from raw accelerometer output.
+  double accX = imuIn->linear_acceleration.y - sin(roll) * cos(pitch) * 9.81;
+  double accY = imuIn->linear_acceleration.z - cos(roll) * cos(pitch) * 9.81;
+  double accZ = imuIn->linear_acceleration.x + sin(pitch) * 9.81;
 
-  imuPointerLast = (imuPointerLast + 1) % imuQueLength;
+  imuPointerLast = (imuPointerLast + 1) % IMU_BUFFER_SIZE;
 
-  imuTime[imuPointerLast] = imuIn->header.stamp.toSec() - 0.1068;
+  imuTime[imuPointerLast] = imuIn->header.stamp.toSec() - 0.1068;//TODO : what is 0.1068??
   imuRoll[imuPointerLast] = roll;
   imuPitch[imuPointerLast] = pitch;
   imuYaw[imuPointerLast] = yaw;
@@ -645,20 +720,16 @@ int main(int argc, char** argv)
   ros::init(argc, argv, "scanRegistration");
   ros::NodeHandle nh;
 
-  ros::Subscriber subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2> 
-                                  ("/sync_scan_cloud_filtered", 2, laserCloudHandler);
+  ros::Subscriber subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>
+          ("/sync_scan_cloud_filtered", 2, laserCloudHandler);
 
-  ros::Subscriber subImu = nh.subscribe<sensor_msgs::Imu> 
-                           ("/imu/data", 5, imuHandler);
+  ros::Subscriber subImu = nh.subscribe<sensor_msgs::Imu>
+          ("/imu/data", 5, imuHandler);
 
-  ros::Publisher pubLaserCloudExtreCur = nh.advertise<sensor_msgs::PointCloud2> 
-                                         ("/laser_cloud_extre_cur", 2);
-
-  ros::Publisher pubLaserCloudLast = nh.advertise<sensor_msgs::PointCloud2> 
-                                     ("/laser_cloud_last", 2);
-
-  pubLaserCloudExtreCurPointer = &pubLaserCloudExtreCur;
-  pubLaserCloudLastPointer = &pubLaserCloudLast;
+  pubLaserCloudExtreCurPointer.reset(new ros::Publisher(nh.advertise<sensor_msgs::PointCloud2>
+          ("/laser_cloud_extre_cur", 2)));
+  pubLaserCloudLastPointer.reset(new ros::Publisher(nh.advertise<sensor_msgs::PointCloud2>
+          ("/laser_cloud_last", 2)));
 
   ros::spin();
 
